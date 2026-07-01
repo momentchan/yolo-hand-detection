@@ -6,9 +6,12 @@ Run from a clone of https://github.com/cansik/yolo-hand-detection
 
 Example:
   pip install -r requirements.txt
-  python demo_webcam_ws.py -d 0
+  python demo_webcam_ws.py -d 0 --preview
 
 The aquarium app listens on ws://127.0.0.1:8765 by default.
+
+With --mirror (default on), Python flips X before inference and preview.
+Coordinates on the wire are already in view space — the app does not mirror again.
 """
 
 from __future__ import annotations
@@ -101,11 +104,15 @@ def load_yolo(network: str, yolo_dir: Path):
     return YOLO(str(models / "cross-hands-tiny.cfg"), str(models / "cross-hands-tiny.weights"), ["hand"])
 
 
+def mirror_frame_x(frame):
+    """Horizontal selfie flip — only X axis."""
+    return cv2.flip(frame, 1)
+
+
 def results_to_payload(
     results: list,
     frame_width: int,
     frame_height: int,
-    mirror: bool,
     hand_limit: int,
 ) -> dict:
     ordered = sorted(results, key=lambda item: item[2], reverse=True)
@@ -127,7 +134,6 @@ def results_to_payload(
     return {
         "frame_width": int(frame_width),
         "frame_height": int(frame_height),
-        "mirror": mirror,
         "detections": detections,
     }
 
@@ -157,7 +163,7 @@ def parse_args() -> argparse.Namespace:
         "--mirror",
         action=argparse.BooleanOptionalAction,
         default=True,
-        help="Mirror normalized X (typical for front-facing webcam)",
+        help="Flip X before inference and preview (default: on)",
     )
     parser.add_argument(
         "--preview",
@@ -188,6 +194,9 @@ def main() -> None:
     hub = DetectionWebSocketHub(args.host, args.port)
     hub.start()
 
+    if args.mirror:
+        print("[hand-detector] mirror X on (preview and detections use the same view)")
+
     print("starting webcam...")
     capture = cv2.VideoCapture(args.device)
     if not capture.isOpened():
@@ -202,14 +211,14 @@ def main() -> None:
             if not ok:
                 break
 
-            frame_height, frame_width = frame.shape[:2]
-            _width, _height, inference_time, results = yolo.inference(frame)
+            view = mirror_frame_x(frame) if args.mirror else frame
+            frame_height, frame_width = view.shape[:2]
+            _width, _height, inference_time, results = yolo.inference(view)
 
             payload = results_to_payload(
                 results,
                 frame_width,
                 frame_height,
-                args.mirror,
                 args.hands,
             )
             hub.broadcast(payload)
@@ -217,7 +226,7 @@ def main() -> None:
             if args.preview:
                 fps = 0.0 if inference_time <= 0 else round(1 / inference_time, 2)
                 cv2.putText(
-                    frame,
+                    view,
                     f"{fps} FPS | hands: {len(payload['detections'])}",
                     (15, 15),
                     cv2.FONT_HERSHEY_SIMPLEX,
@@ -227,13 +236,13 @@ def main() -> None:
                 )
                 for det in payload["detections"]:
                     cv2.rectangle(
-                        frame,
+                        view,
                         (det["xmin"], det["ymin"]),
                         (det["xmax"], det["ymax"]),
                         (0, 255, 255),
                         2,
                     )
-                cv2.imshow("preview", frame)
+                cv2.imshow("preview", view)
                 if cv2.waitKey(1) == 27:
                     break
     finally:
